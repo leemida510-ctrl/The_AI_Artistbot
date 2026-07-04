@@ -1,9 +1,9 @@
 import os
 import logging
 import io
-import asyncio
-from datetime import datetime, timedelta
-from typing import Dict, Optional
+import time
+from datetime import datetime
+from typing import Optional, Dict
 import requests
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes, CallbackQueryHandler
@@ -17,10 +17,6 @@ RAILWAY_URL = os.environ.get('RAILWAY_STATIC_URL', '')
 
 if not BOT_TOKEN:
     raise ValueError("BOT_TOKEN environment variable is required!")
-if not HF_API_KEY:
-    raise ValueError("HF_API_KEY environment variable is required!")
-if not RAILWAY_URL:
-    logging.warning("RAILWAY_STATIC_URL not set. Webhook may not work properly.")
 
 # ===== LOGGING =====
 logging.basicConfig(
@@ -38,38 +34,31 @@ MAX_PROMPT_LENGTH = 500
 STYLES = {
     "realistic": {
         "name": "📸 Realistic",
-        "prompt": "photorealistic, detailed, 8k, high quality, professional photography",
-        "negative": "cartoon, anime, painting, sketch, blurry, low quality"
+        "prompt": "photorealistic, detailed, 8k, high quality, professional photography"
     },
     "anime": {
         "name": "🎌 Anime",
-        "prompt": "anime style, studio ghibli, vibrant colors, detailed, beautiful artwork",
-        "negative": "realistic, photorealistic, photograph, 3d render"
+        "prompt": "anime style, studio ghibli, vibrant colors, detailed, beautiful artwork"
     },
     "painting": {
         "name": "🎨 Oil Painting",
-        "prompt": "oil painting, artistic, brush strokes, masterpiece, van gogh style",
-        "negative": "photorealistic, digital art, cartoon"
+        "prompt": "oil painting, artistic, brush strokes, masterpiece, van gogh style"
     },
     "cartoon": {
         "name": "🖍️ Cartoon",
-        "prompt": "cartoon style, pixar, colorful, cheerful, animated, disney style",
-        "negative": "realistic, photograph, dark, scary"
+        "prompt": "cartoon style, pixar, colorful, cheerful, animated, disney style"
     },
     "sketch": {
         "name": "✏️ Sketch",
-        "prompt": "pencil sketch, detailed shading, black and white, artistic drawing",
-        "negative": "color, painting, photorealistic, digital art"
+        "prompt": "pencil sketch, detailed shading, black and white, artistic drawing"
     },
     "cyberpunk": {
         "name": "🌃 Cyberpunk",
-        "prompt": "cyberpunk, neon lights, futuristic, dark atmosphere, synthwave, sci-fi",
-        "negative": "nature, bright, daytime, vintage"
+        "prompt": "cyberpunk, neon lights, futuristic, dark atmosphere, synthwave, sci-fi"
     },
     "fantasy": {
         "name": "🐉 Fantasy",
-        "prompt": "fantasy art, magical, mythical creatures, epic, enchanting, mystical",
-        "negative": "modern, realistic, technology, mundane"
+        "prompt": "fantasy art, magical, mythical creatures, epic, enchanting, mystical"
     }
 }
 
@@ -98,10 +87,10 @@ def generate_image(prompt: str, style: str = "realistic") -> Optional[bytes]:
     }
     
     payload = {
-        "inputs": full_prompt[:1000],  # Limit prompt length
+        "inputs": full_prompt[:1000],
         "parameters": {
-            "negative_prompt": style_data['negative'],
-            "num_inference_steps": 30,
+            "negative_prompt": "blurry, low quality, distorted, ugly, worst quality",
+            "num_inference_steps": 25,
             "guidance_scale": 7.5,
             "width": 512,
             "height": 512
@@ -110,6 +99,8 @@ def generate_image(prompt: str, style: str = "realistic") -> Optional[bytes]:
     
     try:
         logger.info(f"Generating image with style: {style}")
+        logger.info(f"Prompt: {full_prompt[:100]}...")
+        
         response = requests.post(
             f"https://api-inference.huggingface.co/models/{HF_MODEL}",
             headers=headers,
@@ -122,8 +113,10 @@ def generate_image(prompt: str, style: str = "realistic") -> Optional[bytes]:
             return response.content
         elif response.status_code == 503:
             # Model is loading - wait and retry
-            logger.warning("Model is loading, waiting 5 seconds...")
-            time.sleep(5)
+            logger.warning("Model is loading, waiting 10 seconds...")
+            time.sleep(10)
+            
+            # Retry
             response = requests.post(
                 f"https://api-inference.huggingface.co/models/{HF_MODEL}",
                 headers=headers,
@@ -133,18 +126,20 @@ def generate_image(prompt: str, style: str = "realistic") -> Optional[bytes]:
             if response.status_code == 200:
                 logger.info("Image generated successfully on retry")
                 return response.content
+            else:
+                logger.error(f"Retry failed: {response.status_code}")
+                return None
         else:
-            logger.error(f"API Error: {response.status_code} - {response.text[:200]}")
+            logger.error(f"API Error: {response.status_code}")
+            if response.status_code == 401:
+                logger.error("Invalid HF_API_KEY!")
             return None
             
     except requests.exceptions.Timeout:
         logger.error("API request timed out")
         return None
-    except requests.exceptions.RequestException as e:
-        logger.error(f"Request error: {str(e)}")
-        return None
     except Exception as e:
-        logger.error(f"Unexpected error: {str(e)}")
+        logger.error(f"Error: {str(e)}")
         return None
 
 def check_cooldown(user_id: int) -> tuple[bool, int]:
@@ -166,12 +161,12 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> N
         "• Use `/style` to change the art style\n"
         "• Use `/help` for all commands\n\n"
         "🚀 *Try this:* `a beautiful sunset over mountains`\n\n"
-        "⚡ *Note:* Generation takes 10-30 seconds"
+        "⏱️ *Note:* Generation takes 10-30 seconds"
     )
     
     keyboard = [
         [InlineKeyboardButton("🎨 Change Style", callback_data="show_styles")],
-        [InlineKeyboardButton("💡 Tips & Tricks", callback_data="show_tips")]
+        [InlineKeyboardButton("💡 Tips", callback_data="show_tips")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
     
@@ -190,7 +185,7 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "• `/style` - Change art style\n"
         "• `/styles` - List all styles\n"
         "• `/info` - Bot information\n"
-        "• `/reset` - Reset to default settings\n\n"
+        "• `/reset` - Reset to default style\n\n"
         "💡 *Just type any description to generate an image!*\n\n"
         "📝 *Example prompts:*\n"
         "• `a cat wearing a suit`\n"
@@ -233,12 +228,10 @@ async def styles_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     styles_text = "🎨 *Available Art Styles*\n\n"
     for style_key, style_data in STYLES.items():
         styles_text += f"• {style_data['name']}\n"
-        styles_text += f"  _{style_data['prompt'][:50]}..._\n\n"
     
     await update.message.reply_text(
         styles_text,
-        parse_mode=ParseMode.MARKDOWN,
-        disable_web_page_preview=True
+        parse_mode=ParseMode.MARKDOWN
     )
 
 async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -251,9 +244,6 @@ async def info_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "🎨 *Styles:* 7 art styles available\n"
         "🆓 *Price:* Completely free\n"
         "⏱️ *Generation time:* 10-30 seconds\n\n"
-        "📊 *Statistics:*\n"
-        "• Active users: *Active* 🟢\n"
-        "• Uptime: *99.9%* ✅\n\n"
         "👨‍💻 *Developer:* Open Source\n"
         "🔗 *Source:* GitHub"
     )
@@ -280,7 +270,6 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     data = query.data
     
     if data == "show_styles":
-        # Show style menu
         current_style = user_styles.get(user_id, "realistic")
         keyboard = []
         row = []
@@ -313,7 +302,7 @@ async def button_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
             "4. Add artistic terms (photorealistic, vibrant)\n"
             "5. Try different styles for the same prompt\n\n"
             "✨ *Good:*\n"
-            "`A golden retriever playing in a sunny park, photorealistic, warm colors`\n\n"
+            "`A golden retriever playing in a sunny park, photorealistic`\n\n"
             "❌ *Bad:*\n"
             "`dog`"
         )
@@ -340,8 +329,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     # Validate prompt
     if len(prompt) > MAX_PROMPT_LENGTH:
         await update.message.reply_text(
-            f"⚠️ Prompt is too long! Maximum {MAX_PROMPT_LENGTH} characters.\n"
-            f"Your prompt: {len(prompt)} characters"
+            f"⚠️ Prompt is too long! Maximum {MAX_PROMPT_LENGTH} characters."
         )
         return
     
@@ -379,7 +367,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 f"🖼️ *Generated Image*\n"
                 f"🎨 Style: {style_name}\n"
                 f"📝 Prompt: `{prompt[:80]}{'...' if len(prompt) > 80 else ''}`\n\n"
-                f"💡 Try `/style` to change styles or `/help` for commands"
+                f"💡 Try `/style` to change styles"
             )
             
             await update.message.reply_photo(
@@ -388,7 +376,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 parse_mode=ParseMode.MARKDOWN
             )
             
-            # Delete status message
             await status_msg.delete()
             
         else:
@@ -397,7 +384,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
                 "Possible reasons:\n"
                 "• The AI model is busy (try again)\n"
                 "• Your prompt might be too complex\n"
-                "• API limits reached (try later)\n\n"
+                "• API limits reached\n\n"
                 "💡 Try a simpler prompt or different style.",
                 parse_mode=ParseMode.MARKDOWN
             )
@@ -406,7 +393,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         logger.error(f"Error in handle_message: {str(e)}")
         await status_msg.edit_text(
             "❌ *An error occurred*\n\n"
-            "Please try again later. If the problem persists, contact support.",
+            "Please try again later.",
             parse_mode=ParseMode.MARKDOWN
         )
 
@@ -425,21 +412,20 @@ def main() -> None:
         app.add_handler(CommandHandler("info", info_command))
         app.add_handler(CommandHandler("reset", reset_command))
         
-        # Add message handler (non-command text)
+        # Add message handler
         app.add_handler(MessageHandler(
             filters.TEXT & ~filters.COMMAND,
             handle_message
         ))
         
-        # Add callback handler for buttons
+        # Add callback handler
         app.add_handler(CallbackQueryHandler(button_callback))
         
-        # Configure webhook if on Railway
+        # Configure webhook or polling
         if RAILWAY_URL:
             webhook_url = f"https://{RAILWAY_URL}/{BOT_TOKEN}"
             logger.info(f"Setting webhook to: {webhook_url}")
             
-            # Setup webhook
             app.run_webhook(
                 listen="0.0.0.0",
                 port=PORT,
@@ -447,8 +433,7 @@ def main() -> None:
                 webhook_url=webhook_url
             )
         else:
-            # Fallback to polling (for local development)
-            logger.info("Running in polling mode (local development)")
+            logger.info("Running in polling mode")
             app.run_polling()
             
     except Exception as e:
@@ -456,6 +441,4 @@ def main() -> None:
         raise
 
 if __name__ == "__main__":
-    # Import time for retry delay
-    import time
     main()
